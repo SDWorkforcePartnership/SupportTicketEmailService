@@ -1,0 +1,142 @@
+global class SupportTicketEmailService implements Messaging.InboundEmailHandler {
+	
+    global Messaging.InboundEmailResult handleInboundEmail(Messaging.inboundEmail email,Messaging.InboundEnvelope envelop){
+		Messaging.InboundEmailResult result = new Messaging.InboundEmailResult();
+		
+        //Instantiate email variables
+        String fromName = email.fromName;
+		String emailBody = email.plainTextBody;
+		String subject = email.Subject;
+        String fromAddress = email.fromAddress;
+        List<String> ccAddresses = email.ccAddresses;
+        List<String> toAddresses = email.toAddresses;
+        
+        
+		//Search the email for a thread id. If none found, create a new Support Ticket record.
+		Support_Ticket__c st = new Support_Ticket__c();
+        List<Support_Ticket__c> existingTickets = [SELECT Id 
+                                                   FROM Support_Ticket__c 
+                                                   WHERE Subject__c LIKE :('%' + subject) AND Status__c != 'Closed'];
+        
+        
+        
+        if (existingTickets.size() > 0) {
+            st.Id = existingTickets[0].Id;
+            st.Last_Email_Received__c = Datetime.now();
+            update st;
+        } else {            
+            st.Status__c = 'Open';
+            st.Subject__c = subject;
+            st.Description__c = emailBody;
+            st.Contact_Email__c = fromAddress;
+            st.Category__c = 'Reported thru Case';
+            st.Source__c = 'Email';
+            st.Last_Email_Received__c = Datetime.now();
+            
+            List<Contact> supTicketContacts = [SELECT Id FROM Contact WHERE Email = :fromAddress];
+            if (supTicketContacts.size() > 0) {
+                st.Case_Created_By__c = supTicketContacts[0].Id;
+            }
+            
+            //Find what record type it is based on what address the email was sent to.
+            for (String address: toAddresses) {
+                if (address == 'inquiries@workforce.org' || address == 'supportticketemailservice@d-1jdnosi9pbmpglgk0hocrcqv1jhv8bscpt9jmrd39ydfdi7nbd.1n-1jvwiuam.na115.apex.salesforce.com') {
+                    st.RecordTypeId = '0123l0000019IcIAAU';
+                } else if (address == 'caljobs@workforce.org' || address == 'supportticketemailservice@o-1zqr8srna6d2v49sgx20ejh59j9u9sa70x56wrm4qdxcalp6e2.1n-1jvwiuam.na115.apex.salesforce.com') {
+                    st.RecordTypeId = '0123l0000019IcDAAU';
+                } else if (address == 'SalesforceSupport@workforce.org' || address == 'supportticketemailservice@q-1qap1uofbrg5pk0nrb81xia48a3aakhyv5e2klt8u78psckip7.1n-1jvwiuam.na115.apex.salesforce.com') {
+                    st.RecordTypeId = '0121N000001M6WgQAK';
+                }
+            }
+            
+            insert st;
+        }		
+        		
+        //Insert an EmailMessage record related to the Support Ticket
+		EmailMessage em = new EmailMessage();
+ 
+        if (ccAddresses != null) {
+            String ccAddressString = '';
+            for (String s : ccAddresses) {
+                ccAddressString += s + '; ';
+            }
+            em.CcAddress = ccAddressString;
+        }		
+        
+        em.FromAddress = fromAddress;
+        em.FromName = fromName;
+        //em.HtmlBody = email.htmlBody;
+        em.RelatedToId = st.Id;
+        em.Subject = subject;
+        em.TextBody = emailBody;
+        em.MessageDate = Datetime.now();
+        
+        if (toAddresses != null) {
+            String toAddressString = '';
+            for (String s : toAddresses) {
+                toAddressString += s + '; ';
+            }
+            em.ToAddress = toAddressString;
+        }        
+        
+        insert em;
+        
+        
+        
+        if (email.textAttachments != null || email.binaryAttachments != null) {
+            
+            //ContentVersion is the actual file, and ContentDocumentLink is its relationship to the parent record
+            List<ContentVersion> cvList = new List<ContentVersion>();
+            List<ContentDocumentLink> cdlList = new List<ContentDocumentLink>();
+            
+            // Save text attachments, if any
+            if (email.textAttachments != null) {         
+                
+                for (Messaging.Inboundemail.TextAttachment tAttachment : email.textAttachments) {
+                    ContentVersion attachment = new ContentVersion();
+                    attachment.Title = tAttachment.fileName;
+                    attachment.VersionData = Blob.valueof(tAttachment.body);
+                    attachment.PathOnClient = '/' + tAttachment.fileName;
+                    cvList.add(attachment);
+                }
+                
+            }
+            
+            // Save binary attachments, if any
+            if(email.binaryAttachments != null) {           
+                
+                for (Messaging.Inboundemail.BinaryAttachment bAttachment : email.binaryAttachments) {
+                    ContentVersion attachment = new ContentVersion();
+                    attachment.Title = bAttachment.fileName;
+                    attachment.VersionData = bAttachment.body;
+                    attachment.PathOnClient = '/' + bAttachment.fileName;
+                    cvList.add(attachment);
+                }
+            }
+            // Insert the list after checking for both text and binary attachments
+            insert cvList;
+            
+            
+            // Query the Id's after the ContentVersion records have been inserted
+            cvList = [SELECT ContentDocumentId FROM ContentVersion WHERE Id = :cvList];
+            if (cvList != null) {
+                
+                for (ContentVersion cv : cvList) {
+                    ContentDocumentLink cl = new ContentDocumentLink();
+                    cl.ContentDocumentId = cv.ContentDocumentId;
+                    cl.LinkedEntityId = st.Id; //Shared with record ID
+                    cl.ShareType = 'V';
+                    cl.Visibility = 'AllUsers';
+                    cdlList.add(cl);  
+                }
+                insert cdlList;
+                
+                System.debug('Binary attachments cvList: ' + cvList);
+                System.debug('Binary attachments cdlList: ' + cdlList);  
+            }
+            
+        }
+        
+		return null;
+	}
+}
